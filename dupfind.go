@@ -21,16 +21,22 @@ type BuildCmd struct {
 	Workers int    `short:"j" help:"Number of parallel workers" default:"4"`
 }
 
+type FindCmd struct {
+	Path    string `arg:"" name:"path" help:"Directory of files to look up." type:"path"`
+	Index   string `arg:"" help:"Index file." type:"path"`
+	Workers int    `short:"j" help:"Number of parallel workers" default:"4"`
+	Short   bool   `help:"For duplicate files, only print out path"`
+}
+
 type Metadata struct {
 	Path     string `json:"path"`
 	Checksum string `json:"checksum"`
 }
 
-func (b *BuildCmd) Run(ctx *Context) error {
+func produceMetadata(root string, workers int) <-chan Metadata {
 
 	paths := make(chan string)
 	metadata := make(chan Metadata)
-	var wg sync.WaitGroup
 
 	// close metadata channel once all producers are done
 	var gather sync.WaitGroup
@@ -39,32 +45,26 @@ func (b *BuildCmd) Run(ctx *Context) error {
 		close(metadata)
 	}()
 
-	// start producer (paths)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		produceFilePaths(b.Path, paths)
-	}()
+	// start producer
+	go produceFilePaths(root, paths)
 
-	// start consumer/producer (paths -> metadata)
-	for i := 0; i < b.Workers; i++ {
-		wg.Add(1)
+	// start consumer/producer (path -> metadata)
+	for i := 0; i < workers; i++ {
 		gather.Add(1)
 		go func(consumerID int) {
-			defer wg.Done()
 			defer gather.Done()
 			consumeFilePaths(consumerID, paths, metadata)
 		}(i)
 	}
 
-	// start consumer (metadata)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		consumeMetadata(metadata, b.Index)
-	}()
+	return metadata
+}
 
-	wg.Wait()
+func (b *BuildCmd) Run(ctx *Context) error {
+
+	metadata := produceMetadata(b.Path, b.Workers)
+	writeIndex(metadata, b.Index)
+
 	return nil
 }
 
@@ -108,27 +108,76 @@ func computeChecksum(path string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-func consumeMetadata(metadata <-chan Metadata, index string) {
+func writeIndex(metadata <-chan Metadata, index string) {
+
+	var records []Metadata
+	for record := range metadata {
+		records = append(records, record)
+	}
+
 	file, err := os.Create(index)
 	if err != nil {
 		panic(err)
 	}
 	defer file.Close()
 
-	for record := range metadata {
-		jsonData, err := json.Marshal(record)
-		if err != nil {
-			panic(err)
-		}
-		file.Write(jsonData)
-		file.WriteString("\n")
+	jsonData, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		panic(err)
 	}
+	file.Write(jsonData)
 
 	fmt.Printf("Index file %s written.\n", index)
 }
 
+func (f *FindCmd) Run(ctx *Context) error {
+
+	index := loadIndex(f.Index)
+	metadata := produceMetadata(f.Path, f.Workers)
+	lookupRecords(metadata, index, f.Short)
+
+	return nil
+}
+
+func loadIndex(path string) map[string]string {
+
+	jsonData, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatal("Error reading file:", err)
+	}
+
+	var records []Metadata
+	err = json.Unmarshal(jsonData, &records)
+	if err != nil {
+		log.Fatal("Error unmarshaling JSON:", err)
+	}
+
+	index := make(map[string]string)
+	for _, record := range records {
+		index[record.Checksum] = record.Path
+	}
+
+	return index
+}
+
+func lookupRecords(metadata <-chan Metadata, index map[string]string, short bool) {
+	for record := range metadata {
+		indexPath, duplicate := index[record.Checksum]
+		if duplicate {
+			if short {
+				file := filepath.Base(record.Path)
+				fmt.Println(file)
+			} else {
+				fmt.Printf("File %s is duplicate with index file %s\n",
+					record.Path, indexPath)
+			}
+		}
+	}
+}
+
 var cli struct {
 	Build BuildCmd `cmd:"" help:"Build index"`
+	Find  FindCmd  `cmd:"" help:"Look up files in index"`
 }
 
 func main() {
