@@ -117,13 +117,13 @@ func writeIndex(metadata <-chan Metadata, index string) {
 
 	file, err := os.Create(index)
 	if err != nil {
-		panic(err)
+		log.Fatal("Error opening file:", err)
 	}
 	defer file.Close()
 
 	jsonData, err := json.MarshalIndent(records, "", "  ")
 	if err != nil {
-		panic(err)
+		log.Fatal("Error marshaling to JSON:", err)
 	}
 	file.Write(jsonData)
 
