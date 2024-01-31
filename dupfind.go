@@ -26,6 +26,7 @@ type FindCmd struct {
 	Index   string `arg:"" help:"Index file." type:"path"`
 	Workers int    `short:"j" help:"Number of parallel workers" default:"4"`
 	Short   bool   `help:"For duplicate files, only print out path"`
+	Rm      bool   `help:"Remove duplicate files. WARNING: IRREVERSIBLE"`
 }
 
 type Metadata struct {
@@ -134,7 +135,7 @@ func (f *FindCmd) Run(ctx *Context) error {
 
 	index := loadIndex(f.Index)
 	metadata := produceMetadata(f.Path, f.Workers)
-	lookupRecords(metadata, index, f.Short)
+	lookupRecords(metadata, index, f.Short, f.Rm)
 
 	return nil
 }
@@ -160,11 +161,18 @@ func loadIndex(path string) map[string]string {
 	return index
 }
 
-func lookupRecords(metadata <-chan Metadata, index map[string]string, short bool) {
+func lookupRecords(metadata <-chan Metadata, index map[string]string, short bool, rm bool) {
 	for record := range metadata {
 		indexPath, duplicate := index[record.Checksum]
 		if duplicate {
-			if short {
+			if rm {
+				err := os.Remove(record.Path)
+				if err != nil {
+					log.Println(err)
+				} else {
+					fmt.Printf("Removed %s\n", record.Path)
+				}
+			} else if short {
 				file := filepath.Base(record.Path)
 				fmt.Println(file)
 			} else {
